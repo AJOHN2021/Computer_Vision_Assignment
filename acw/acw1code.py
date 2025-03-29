@@ -1,4 +1,4 @@
-import cv2
+import cv2 
 import numpy as np
 import argparse
 import os
@@ -19,15 +19,19 @@ COLOR_RANGES = {
     "yellow": [(20, 100, 100), (40, 255, 255)]  # Yellow (warning signs)
 }
 
+def get_sign_id(sign_name):
+    for sign_id, name in SIGN_CLASSES.items():
+        if name.lower() == sign_name.lower():
+            return sign_id
+    return 0  # Unknown
+
 def preprocess_image(image):
-    """ Convert to grayscale, blur, and apply edge detection """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 50, 150)
     return edges
 
 def detect_shapes(image):
-    """ Detect circular, triangular, and rectangular shapes using contours """
     contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detected_signs = []
 
@@ -35,39 +39,43 @@ def detect_shapes(image):
         approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
         area = cv2.contourArea(contour)
 
-        if area > 500:  # Filter small detections
+        if area > 500:
             x, y, w, h = cv2.boundingRect(approx)
             aspect_ratio = w / float(h)
-            
-            if len(approx) == 3:  # Triangle (warning signs)
-                detected_signs.append(("triangle", x, y, w, h))
-            elif len(approx) == 4 and 0.8 < aspect_ratio < 1.2:  # Square/Rectangle (regulatory signs)
-                detected_signs.append(("rectangle", x, y, w, h))
-            elif len(approx) > 5:  # Circle (speed limit signs)
-                detected_signs.append(("circle", x, y, w, h))
+
+            if len(approx) == 3:
+                detected_signs.append(("warning", x, y, w, h))
+            elif len(approx) == 4 and 0.8 < aspect_ratio < 1.2:
+                detected_signs.append(("give way", x, y, w, h))
+            elif len(approx) > 5:
+                detected_signs.append(("30MPH", x, y, w, h))
 
     return detected_signs
 
 def detect_signs(image):
-    """ Detect road signs using color and shape filtering """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     edges = preprocess_image(image)
-    detected_signs = detect_shapes(edges)
+    detected_shapes = detect_shapes(edges)
 
     final_detections = []
+    seen_boxes = set()
 
-    for sign, x, y, w, h in detected_signs:
+    for sign, x, y, w, h in detected_shapes:
+        box = (x, y, w, h)
+        if box in seen_boxes:
+            continue  # Avoid duplicates
+        seen_boxes.add(box)
+
         roi = hsv[y:y+h, x:x+w]
 
         for color, (lower, upper) in COLOR_RANGES.items():
             mask = cv2.inRange(roi, np.array(lower), np.array(upper))
-            if cv2.countNonZero(mask) > 100:  # Check if color is dominant
+            if cv2.countNonZero(mask) > 100:
                 final_detections.append((sign, color, x, y, w, h))
 
     return final_detections
 
 def process_image(image_path, output_file):
-    """ Process a single image and write results to the output file """
     image = cv2.imread(image_path)
     if image is None:
         print(f"Error: Unable to load {image_path}")
@@ -77,38 +85,52 @@ def process_image(image_path, output_file):
     detections = detect_signs(image)
     img_h, img_w = image.shape[:2]
 
-    with open(output_file, 'a') as f:
-        for sign, color, x, y, w, h in detections:
-            norm_x = round(x / img_w, 4)
-            norm_y = round(y / img_h, 4)
-            norm_w = round(w / img_w, 4)
-            norm_h = round(h / img_h, 4)
-            confidence = 1.0  # Confidence set to 1.0 for now
-            f.write(f"{filename},0,{sign},{norm_x},{norm_y},{norm_w},{norm_h},0,0,{confidence}\n")
+    for sign, color, x, y, w, h in detections:
+        sign_id = get_sign_id(sign)
+        norm_x = round((x + w / 2) / img_w, 4)
+        norm_y = round((y + h / 2) / img_h, 4)
+        norm_w = round(w / img_w, 4)
+        norm_h = round(h / img_h, 4)
+        confidence = 1.0
+        with open(output_file, 'a') as f:
+            f.write(f"{filename},{sign_id},{sign},{norm_x},{norm_y},{norm_w},{norm_h},0,0,{confidence}\n")
+
+        # Optional: draw bounding box for visualization
+        cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.putText(image, sign, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+
+    # Save annotated image
+    output_img_path = os.path.splitext(filename)[0] + "_annotated.jpg"
+    cv2.imwrite(output_img_path, image)
 
 def process_video(video_path, output_file):
-    """ Process a video frame by frame and write detections """
     cap = cv2.VideoCapture(video_path)
     frame_number = 0
 
-    with open(output_file, 'a') as f:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-            frame_number += 1
-            detections = detect_signs(frame)
-            img_h, img_w = frame.shape[:2]
-            timestamp = round(frame_number / cap.get(cv2.CAP_PROP_FPS), 2)
+        frame_number += 1
+        detections = detect_signs(frame)
+        img_h, img_w = frame.shape[:2]
+        timestamp = round(frame_number / cap.get(cv2.CAP_PROP_FPS), 2)
 
-            for sign, color, x, y, w, h in detections:
-                norm_x = round(x / img_w, 4)
-                norm_y = round(y / img_h, 4)
-                norm_w = round(w / img_w, 4)
-                norm_h = round(h / img_h, 4)
-                confidence = 1.0
-                f.write(f"{video_path},{frame_number},{sign},{norm_x},{norm_y},{norm_w},{norm_h},{frame_number},{timestamp},{confidence}\n")
+        for sign, color, x, y, w, h in detections:
+            sign_id = get_sign_id(sign)
+            norm_x = round((x + w / 2) / img_w, 4)
+            norm_y = round((y + h / 2) / img_h, 4)
+            norm_w = round(w / img_w, 4)
+            norm_h = round(h / img_h, 4)
+            confidence = 1.0
+            with open(output_file, 'a') as f:
+                f.write(f"{video_path},{sign_id},{sign},{norm_x},{norm_y},{norm_w},{norm_h},{frame_number},{timestamp},{confidence}\n")
+
+        # Optional: visualize
+        for sign, color, x, y, w, h in detections:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, sign, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
 
     cap.release()
 
